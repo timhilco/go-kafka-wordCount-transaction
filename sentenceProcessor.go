@@ -63,7 +63,7 @@ func startProcessingLoop(wg *sync.WaitGroup, bootstrapServer string, workerID st
 			}
 			switch e := ev.(type) {
 			case *kafka.Message:
-				performPipeline(e, consumer, producer)
+				performPipeline(e, consumer, producer, i)
 			case kafka.Error:
 				fmt.Fprintf(os.Stderr, "%% Error: %v: %v", e.Code(), e)
 				if e.Code() == kafka.ErrAllBrokersDown {
@@ -83,11 +83,11 @@ func startProcessingLoop(wg *sync.WaitGroup, bootstrapServer string, workerID st
 	logger.Info().Msg(text)
 	producer.Close()
 }
-func performPipeline(e *kafka.Message, consumer *kafka.Consumer, producer *kafka.Producer) {
+func performPipeline(e *kafka.Message, consumer *kafka.Consumer, producer *kafka.Producer, level int) {
 	ctx := context.Background()
 	mPartition := e.TopicPartition.Partition
 	mOffset := e.TopicPartition.Offset
-	text := fmt.Sprintf("____________ Received <-   %s:%s     Partition: %d [%d] _____________", e.Key, e.Value,
+	text := fmt.Sprintf("Level %d: ____________ Received <-   %s:%s     Partition: %d [%d] _____________", level, e.Key, e.Value,
 		mPartition, mOffset)
 	logger.Debug().Msg(text)
 	// Process Message
@@ -109,7 +109,7 @@ func performPipeline(e *kafka.Message, consumer *kafka.Consumer, producer *kafka
 		text := fmt.Sprintf("Error: %v", err)
 		logger.Info().Msg(text)
 	} else {
-		text = fmt.Sprintf("-->Begin Transaction:     %s for Producer:  %v ", tranactionId, producer)
+		text = fmt.Sprintf("Level %d: -->Begin Transaction:     %s for Producer:  %v ", level, tranactionId, producer)
 		logger.Info().Msg(text)
 	}
 	for key, value := range wordCount {
@@ -127,7 +127,7 @@ func performPipeline(e *kafka.Message, consumer *kafka.Consumer, producer *kafka
 			text := fmt.Sprintf("Delivery failed: %v", m.TopicPartition.Error)
 			logger.Info().Msg(text)
 		} else {
-			text := fmt.Sprintf("Published-> %s:%s - Partition: %d [%d]", m.Key, m.Value,
+			text := fmt.Sprintf("Level %d: Published-> %s:%s - Partition: %d [%d]", level, m.Key, m.Value,
 				m.TopicPartition.Partition, m.TopicPartition.Offset)
 			logger.Debug().Msg(text)
 		}
@@ -138,43 +138,45 @@ func performPipeline(e *kafka.Message, consumer *kafka.Consumer, producer *kafka
 	position := getConsumerPosition(partition, consumer)
 	consumerMetadata, err := consumer.GetConsumerGroupMetadata()
 	if err != nil {
-		logger.Info().Msg(fmt.Sprintf("Failed to get consumer group metadata: %v", err))
+		logger.Info().Msg(fmt.Sprintf("Level %d: Failed to get consumer group metadata: %v", level, err))
 	}
 	err = producer.SendOffsetsToTransaction(ctx, position, consumerMetadata)
 	// Commit or Abort Transaction
 	if err != nil {
-		logger.Info().Msg("Aborting Transaction: " + tranactionId)
+		text := fmt.Sprintf("Level: %d ---> Aborting Transaction: %s", level, tranactionId)
+		logger.Info().Msg(text)
 		logger.Info().Msg(fmt.Sprintf(
-			"SendOffsetsToTransaction Error: Failed to send offsets to transaction for input partition %v: %s: aborting transaction",
+			"Level: %d ---> SendOffsetsToTransaction Error: Failed to send offsets to transaction for input partition %v: %s: aborting transaction", level,
 			partition, err))
 
 		err = producer.AbortTransaction(ctx)
 		if err != nil {
-			text := fmt.Sprintf("Abort Transaction Error: %v", err)
+			text := fmt.Sprintf("Level: %d ---> Abort Transaction Error: %v", level, err)
 			logger.Info().Msg(text)
 		}
 		// Rewind this input partition to the last committed offset.
 		rewindConsumerPosition(partition, consumer)
 	} else {
-		text := fmt.Sprintf("SendOffsetsToTransaction - Partition: %d - Position %v", partition, position)
+		text := fmt.Sprintf("Level %d: -->SendOffsetsToTransaction - Partition: %d - Position %v", level, partition, position)
 		logger.Info().Msg(text)
 		err = producer.CommitTransaction(ctx)
 		if err != nil {
 			logger.Info().Msg(fmt.Sprintf(
-				"CommitTransaction Error: Failed to commit transaction for input partition %v: %s",
+				"Level: %d ---> CommitTransaction Error: Failed to commit transaction for input partition %v: %s", level,
 				partition, err))
 
-			logger.Info().Msg("Aborting Transaction: " + tranactionId)
+			text := fmt.Sprintf("Level: %d ---> Abort Transaction Error: %v", level, err)
+			logger.Info().Msg(text)
 			err = producer.AbortTransaction(ctx)
 			if err != nil {
-				text := fmt.Sprintf("Abort Transaction Error: %v", err)
+				text := fmt.Sprintf("Level: %d ---> Abort Transaction Error: %v", level, err)
 				logger.Info().Msg(text)
 			}
 
 			// Rewind this input partition to the last committed offset.
 			rewindConsumerPosition(partition, consumer)
 		} else {
-			text = fmt.Sprintf("-->Transaction Committed: %s for Producer:  %v -- Partition: %v", tranactionId, producer, partition)
+			text = fmt.Sprintf("Level %d: -->Transaction Committed: %s for Producer:  %v -- Partition: %v", level, tranactionId, producer, partition)
 			logger.Info().Msg(text)
 		}
 	}
@@ -194,7 +196,7 @@ func rewindConsumerPosition(partition int32, consumer *kafka.Consumer) {
 			tp.Offset = kafka.OffsetBeginning
 		}
 
-		logger.Info().Msg(fmt.Sprintf("Processor: rewinding input partition %v to offset %v",
+		logger.Info().Msg(fmt.Sprintf("rewindConsumerPosition: rewinding input partition %v to offset %v",
 			tp.Partition, tp.Offset))
 
 		err = consumer.Seek(tp, -1)

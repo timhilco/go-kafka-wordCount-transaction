@@ -1,0 +1,5 @@
+logs.txt
+.vscode/*.*
+file2.txt
+DockerFiles/*.*
+JavaSamples/*.*
